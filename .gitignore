@@ -26,3 +26,6 @@ coverage/
 
 # TS incremental build info
 *.tsbuildinfo
+
+# local Convex backend data (dev/testing only — contains env values)
+.convex/

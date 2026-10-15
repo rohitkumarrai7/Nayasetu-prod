@@ -16,6 +16,20 @@ export default function Error({
   useEffect(() => {
     // Surface for debugging in the browser console.
     console.error("NyayaSetu error boundary:", error);
+    // After a new Vercel deploy, an open tab can request JS chunks that no longer exist
+    // (ChunkLoadError). One hard reload fetches the new build; the session flag prevents loops.
+    if (/ChunkLoadError|Loading chunk [\w-]+ failed|Failed to fetch dynamically imported module/i.test(
+      `${error?.name} ${error?.message}`,
+    )) {
+      try {
+        if (!sessionStorage.getItem("ns-chunk-reload")) {
+          sessionStorage.setItem("ns-chunk-reload", "1");
+          window.location.reload();
+        }
+      } catch {
+        /* storage unavailable — show the error UI instead */
+      }
+    }
   }, [error]);
 
   const looksLikeBackend =
@@ -23,17 +37,17 @@ export default function Error({
 
   return (
     <main className="mx-auto flex min-h-[70vh] max-w-lg flex-col items-center justify-center px-4 text-center">
-      <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
-        <h1 className="text-xl font-semibold text-slate-900">Something didn&apos;t load</h1>
+      <div className="card p-8">
+        <h1 className="text-xl font-semibold text-ink">Something didn&apos;t load</h1>
         {looksLikeBackend ? (
-          <p className="mt-3 text-sm text-slate-600">
+          <p className="mt-3 text-sm text-ink-soft">
             The app couldn&apos;t reach its backend functions. This usually means the Convex
             deployment hasn&apos;t been deployed yet, or <code>NEXT_PUBLIC_CONVEX_URL</code> points
             to a deployment without the latest functions. Deploy Convex
             (<code>npx convex deploy</code>) and confirm the URL, then reload.
           </p>
         ) : (
-          <p className="mt-3 text-sm text-slate-600">
+          <p className="mt-3 text-sm text-ink-soft">
             An unexpected error occurred. Please try again.
           </p>
         )}
@@ -46,7 +60,7 @@ export default function Error({
           </Link>
         </div>
         {error?.message && (
-          <p className="mt-4 break-words text-left text-xs text-slate-400">{error.message}</p>
+          <p className="mt-4 break-words text-left text-xs text-ink-muted">{error.message}</p>
         )}
       </div>
     </main>

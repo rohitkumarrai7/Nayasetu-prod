@@ -1,75 +1,142 @@
 "use client";
 
-import { Authenticated, Unauthenticated, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
+import { ArrowRight, Check, Clock, Inbox, Landmark, Lock, Mail, MapPin, Phone, Radar, X } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import AppShell, { PageHeader } from "@/components/AppShell";
+import { Empty } from "@/components/ui";
 import { api } from "@/convex/_generated/api";
-import Nav from "@/components/Nav";
-
-const CATEGORY_LABEL: Record<string, string> = {
-  motor_vehicle: "Motor Vehicle",
-  consumer: "Consumer Dispute",
-  property: "Property / Tenancy",
-  other: "General",
-};
+import { Id } from "@/convex/_generated/dataModel";
+import { errMsg, timeAgo } from "@/lib/client";
 
 export default function LeadsPage() {
   return (
-    <>
-      <Nav />
-      <main className="mx-auto max-w-4xl px-4 py-8">
-        <Unauthenticated>
-          <p className="text-slate-600">
-            Please <Link href="/" className="text-brand underline">sign in</Link> to view leads.
-          </p>
-        </Unauthenticated>
-        <Authenticated>
-          <Leads />
-        </Authenticated>
-      </main>
-    </>
+    <AppShell>
+      <Leads />
+    </AppShell>
   );
 }
 
 function Leads() {
-  const leads = useQuery(api.chat.leads, {});
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Client leads</h1>
-        <Link href="/dashboard" className="text-sm text-brand hover:underline">← Workspace</Link>
-      </div>
-      <p className="mb-5 text-sm text-slate-500">
-        Citizens who used the assistant and <b>consented</b> to be connected with an advocate. Only
-        what they approved is shown.
-      </p>
+  const [onlyMine, setOnlyMine] = useState(false);
+  const [showDismissed, setShowDismissed] = useState(false);
+  const data = useQuery(api.leads.feed, { onlyMyPracticeAreas: onlyMine, includeDismissed: showDismissed });
+  const accept = useMutation(api.leads.accept);
+  const dismiss = useMutation(api.leads.dismiss);
+  const router = useRouter();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-      {leads === undefined && <p className="text-slate-500">Loading…</p>}
-      {leads?.length === 0 && (
-        <p className="text-sm text-slate-400">
-          No consented leads yet. They appear here when a citizen opts in from the{" "}
-          <Link href="/citizen" className="text-brand underline">assistant</Link>.
-        </p>
+  async function onAccept(id: Id<"chatSessions">) {
+    setBusyId(id);
+    setError(null);
+    try {
+      const { matterId } = await accept({ sessionId: id });
+      router.push(`/dashboard/matter/${matterId}`);
+    } catch (e) {
+      setError(errMsg(e));
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Marketplace"
+        title="Client leads near your courts"
+        subtitle="Citizens who used the assistant and explicitly consented to be contacted. Shown when their nearest court is one of your home courts or they're within your radius — closest and newest first."
+      />
+
+      {data === undefined && <div className="grid gap-3 sm:grid-cols-2"><div className="skeleton h-44" /><div className="skeleton h-44" /></div>}
+      {data?.state === "needs_profile" && (
+        <div className="card">
+          <Empty
+            icon={MapPin}
+            title="Set up your advocate profile"
+            text="Add your office location and practice areas. We'll compute your 5 nearest district courts and show leads around them."
+            action={<Link href="/dashboard/profile" className="btn btn-sm">Set up profile</Link>}
+          />
+        </div>
       )}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {leads?.map((l: any) => (
-          <div key={l._id} className="card">
-            <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
-              <span className="badge">{CATEGORY_LABEL[l.category] ?? l.category}</span>
-              {l.location && <span className="badge">{l.location}</span>}
-              <span>· {new Date(l.createdAt).toLocaleDateString()}</span>
-            </div>
-            <p className="text-sm text-slate-800">{l.summary}</p>
-            <div className="mt-2 border-t border-slate-100 pt-2 text-sm">
-              <p className="font-medium text-slate-900">{l.contactName || "—"}</p>
-              {l.contactPhone && (
-                <a href={`tel:${l.contactPhone}`} className="text-brand underline">
-                  {l.contactPhone}
-                </a>
-              )}
+      {data && data.state !== "needs_profile" && (
+        <>
+          <div className="mb-5 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-white px-4 py-3 text-sm">
+            <span className="flex items-center gap-2 text-ink-soft"><Radar className="h-4 w-4 text-brand" /> {data.homeCourtCount} home courts · {data.radiusKm} km radius</span>
+            {data.state === "needs_location" && (
+              <Link href="/dashboard/profile" className="badge bg-saffron-50 text-saffron-700">Add your office location for radius matching →</Link>
+            )}
+            {!data.verified && (
+              <span className="badge bg-sky-50 text-sky-800"><Lock className="h-3 w-3" /> Contacts unlock after BCI verification ({data.verificationStatus})</span>
+            )}
+            <div className="ml-auto flex flex-wrap gap-2">
+              <button onClick={() => setOnlyMine((v) => !v)} className={`chip ${onlyMine ? "chip-on" : ""}`}>My practice areas</button>
+              <button onClick={() => setShowDismissed((v) => !v)} className={`chip ${showDismissed ? "chip-on" : ""}`}>Show dismissed</button>
             </div>
           </div>
-        ))}
-      </div>
-    </div>
+          {error && <p className="mb-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+          {data.leads.length === 0 ? (
+            <div className="card">
+              <Empty icon={Inbox} title="No consented leads near you yet" text="They appear here live the moment a citizen near your courts opts in from the assistant." action={<Link href="/citizen" className="btn-ghost btn-sm">See the citizen assistant</Link>} />
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              {data.leads.map((l) => (
+                <article key={l._id} className={`card flex flex-col p-0 ${l.myAction === "accepted" ? "ring-2 ring-emerald-300" : ""} ${l.myAction === "dismissed" ? "opacity-60" : ""}`}>
+                  <div className="flex-1 p-5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className={`badge ${l.practiceAreaMatch ? "bg-brand text-white" : "bg-brand-50 text-brand"}`}>{l.categoryLabel}</span>
+                      {l.inHomeCourt && <span className="badge bg-emerald-50 text-emerald-700"><Landmark className="h-3 w-3" /> Your court</span>}
+                      {l.distanceKm != null && <span className="badge">{l.distanceKm} km</span>}
+                      <span className="ml-auto flex items-center gap-1 text-xs text-ink-muted"><Clock className="h-3 w-3" /> {timeAgo(l.consentedAt)}</span>
+                    </div>
+                    <p className="mt-3 text-[15px] leading-relaxed text-ink">{l.summary || "Citizen requested an advocate."}</p>
+                    {l.act && <p className="mt-2 text-xs text-ink-muted">Likely law: {l.act}</p>}
+                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted">
+                      {l.location && <span className="flex items-center gap-1"><MapPin className="h-3 w-3" /> {l.location}</span>}
+                      {l.nearestCourtName && <span className="flex items-center gap-1"><Landmark className="h-3 w-3" /> {l.nearestCourtName}</span>}
+                    </div>
+                  </div>
+                  <div className="rounded-b-2xl border-t border-line bg-paper/60 px-5 py-3">
+                    {l.contactLocked ? (
+                      <p className="flex items-center gap-1.5 text-xs text-ink-muted"><Lock className="h-3.5 w-3.5" /> Contact visible to BCI-verified advocates</p>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-3 text-sm">
+                        <span className="font-medium text-ink">{l.contactName || "—"}</span>
+                        {l.contactPhone && (
+                          <a href={l.contactPhone.includes("@") ? `mailto:${l.contactPhone}` : `tel:${l.contactPhone}`} className="flex items-center gap-1 text-brand">
+                            {l.contactPhone.includes("@") ? <Mail className="h-3.5 w-3.5" /> : <Phone className="h-3.5 w-3.5" />} {l.contactPhone}
+                          </a>
+                        )}
+                      </div>
+                    )}
+                    <div className="mt-3 flex gap-2">
+                      {l.myAction === "accepted" && l.matterId ? (
+                        <Link href={`/dashboard/matter/${l.matterId}`} className="btn btn-sm"><Check className="h-3.5 w-3.5" /> Accepted · open matter <ArrowRight className="h-3.5 w-3.5" /></Link>
+                      ) : (
+                        <>
+                          <button className="btn btn-sm" disabled={busyId === l._id || l.contactLocked} onClick={() => void onAccept(l._id)}>
+                            {busyId === l._id ? "Accepting…" : "Accept → create matter"}
+                          </button>
+                          {l.myAction !== "dismissed" && (
+                            <button className="btn-ghost btn-sm" onClick={() => void dismiss({ sessionId: l._id }).catch((e) => setError(errMsg(e)))}>
+                              <X className="h-3.5 w-3.5" /> Dismiss
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+          <p className="mt-6 text-xs text-ink-muted">
+            Only the fields the citizen approved are shown — never their chat. Accepting creates a client and a matter in your workspace. Flat lead fee, never a percentage (BCI Rule 36).
+          </p>
+        </>
+      )}
+    </>
   );
 }

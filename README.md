@@ -49,61 +49,55 @@ convex/                 Convex backend (the differentiator)
   research.ts           vector search → verify → grounded brief
   drafting.ts           grounded first-draft generation
   crm.ts, firms.ts, intake.ts, citizen.ts, marketplace.ts, seed.ts
-  *.test.ts             38 tests (pure logic + in-process Convex integration)
+  *.test.ts             78 tests (pure logic + in-process Convex integration)
 app/                    Next.js frontend (landing, auth, dashboard, matter, citizen, marketplace)
 components/             Nav, AuthForm
 ```
 
-## Run it
+## Deploy checklist (fixes the current production issues)
 
-### 1. Backend (Convex) — you run this locally (this sandbox can't reach api.convex.dev)
-
-```bash
-npm install
-npx convex dev            # links your deployment, pushes schema+functions, generates types
-npx @convex-dev/auth      # one-time: generates the auth JWT keys on your deployment
-
-# LLM/embedding keys (optional — app runs without them):
-npx convex env set GROQ_API_KEY   <your-groq-key>
-npx convex env set GEMINI_API_KEY <your-gemini-key>   # only if it's an AIza… key
-```
-
-### 2. Frontend
+Run these from the repo root, logged in to Convex (`npx convex login`). Order matters.
 
 ```bash
-cp .env.example .env.local   # set NEXT_PUBLIC_CONVEX_URL to your deployment URL
-npm run dev                  # http://localhost:3000
+npm ci
+npx convex deploy                                  # 1. push schema + functions (typechecked)
+node scripts/setup-auth.mjs --prod --site https://nayasetu-prod.vercel.app
+                                                   # 2. JWT keys — without this, sign-up fails
+npx convex env set --prod ADMIN_EMAILS "you@example.com"   # 3. who can approve advocates
+npx convex env set --prod GROQ_API_KEY <key>       # 4. optional: LLM (the app works without it)
+npx convex env set --prod GEMINI_API_KEY <AIza…>   #    optional: embeddings
 ```
 
-Sign up → name your firm → **Load demo judgment corpus** (button) → create a client + matter via
-the guided intake → **Run grounded research** → **Generate draft**.
+5. **Vercel → Settings → Environment Variables:**
+   `NEXT_PUBLIC_CONVEX_URL = https://usable-horse-818.convex.cloud` (your prod deployment URL),
+   then **redeploy** — `NEXT_PUBLIC_*` values are baked in at build time.
+6. Sign up with the `ADMIN_EMAILS` address → `/admin` appears in the nav.
+7. Workspace → **Load demo judgment corpus**; Advocates → **Load sample advocates** (demo only).
+8. If you add or change `GEMINI_API_KEY` later: `/admin` → **Re-index corpus** (vectors from
+   different embedders are not comparable; until re-indexed, lexical search still finds results).
 
-### 3. Deploy (the reliable path — avoids the common Vercel build failure)
+**Diagnosing the chatbot:** it no longer needs an LLM — without one it answers from the built-in
+triage rules (`source: "rules"`). If you set a key and replies still say `rules`, open the Convex
+dashboard → Logs and look for `[llm] provider groq failed: …` (bad key, wrong model, 429).
 
-`next build` does **not** typecheck the Convex functions (they're a separate runtime with their
-own tsconfig + `convex deploy` typecheck). This is deliberate: it's why the Vercel build is stable
-regardless of whether `convex/_generated` holds the committed stub or your regenerated types.
-
-1. **Deploy the backend first (locally, once per release):**
-   ```bash
-   npx convex deploy        # pushes schema + functions, typechecks them properly
-   ```
-2. **Frontend on Vercel:**
-   - Build command: **`next build`** (the default — do NOT use `convex deploy --cmd` unless you
-     also set `CONVEX_DEPLOY_KEY` in Vercel; a missing key is the usual cause of a failing build).
-   - Environment variable: `NEXT_PUBLIC_CONVEX_URL = https://<your-deployment>.convex.cloud`.
-
-   *(Optional one-step:* set Vercel build command to `npx convex deploy --cmd 'next build'` **and**
-   add `CONVEX_DEPLOY_KEY` (Convex dashboard → Settings → Deploy Keys) to Vercel env — then Vercel
-   deploys the backend and frontend together.)
-
-### Tests
+### Local development
 
 ```bash
-npm test          # 38 tests, in-process (no cloud needed)
-npm run typecheck # tsc --noEmit
-npm run build     # next build
+cp .env.example .env.local   # NEXT_PUBLIC_CONVEX_URL = your dev deployment
+npx convex dev               # in one terminal
+node scripts/setup-auth.mjs  # once per dev deployment
+npm run dev:web              # http://localhost:3000
 ```
+
+### Quality gates
+
+```bash
+npm run check   # typecheck (web + Convex) + 78 unit/integration tests + next build
+E2E_CONVEX_URL=http://127.0.0.1:3210 npm run e2e   # ~37 end-to-end checks, THROWAWAY backend only
+```
+
+`next build` deliberately does not typecheck Convex functions (separate runtime); `convex deploy`
+and `npm run typecheck:convex` do.
 
 ## Bringing all the cases in — the free, scalable path (§5 rethink)
 

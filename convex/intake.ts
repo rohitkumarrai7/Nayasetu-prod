@@ -16,6 +16,7 @@ export const checklist = query({
     return {
       category,
       subcategory,
+      label: sub.label,
       checklist: sub.checklist,
       suggestedDocTypes: sub.suggestedDocTypes,
       researchSeed: sub.researchSeed,

@@ -45,8 +45,14 @@ describe("advocate directory", () => {
     // only permissible particulars are exposed (no verified/listed internal flags leaking as UI needs)
     expect(all[0]).toHaveProperty("displayName");
 
+    // geo: a Delhi search returns advocates within their radius of Delhi (incl. Noida/Gurugram),
+    // nearest first, and nobody from Mumbai/Chennai.
     const delhi = await t.query(api.marketplace.searchDirectory, { city: "Delhi" });
-    expect(delhi.every((p: any) => p.city === "Delhi")).toBe(true);
+    expect(delhi.length).toBeGreaterThan(1);
+    expect(delhi.every((p: any) => p.distanceKm !== null && p.distanceKm <= 100)).toBe(true);
+    const ds = delhi.map((p: any) => p.distanceKm);
+    expect([...ds].sort((a, b) => a - b)).toEqual(ds);
+    expect(delhi.some((p: any) => /Mumbai|Chennai/.test(p.city ?? ""))).toBe(false);
 
     const byArea = await t.query(api.marketplace.searchDirectory, { practiceArea: "Motor Vehicle" });
     expect(byArea.every((p: any) => p.practiceAreas.includes("Motor Vehicle"))).toBe(true);

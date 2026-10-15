@@ -1,14 +1,14 @@
-// Advocate search (§1, §4). Fetches advocates via a configurable Apify actor when configured,
-// otherwise falls back to our own verified directory so the feature always returns results.
+// Citizen "find advocates near me" (C3). Verified directory first (geo-matched, PRD §7); optional
+// live listings from a configurable Apify actor are appended and clearly labelled UNVERIFIED, so
+// the "only verified advocates" promise holds for everything we vouch for.
 //
-// Config (Convex env):
+// Config (Convex env, optional):
 //   APIFY_TOKEN   - your Apify API token
-//   APIFY_ACTOR   - actor id/name to run (e.g. a Google-Maps/business-directory scraper you have
-//                   the right to use). Input sent: { searchStringsArray:[query], maxCrawledPlaces, city }
-// Runs from a Convex action (server-side internet), returning results with a click-through URL.
+//   APIFY_ACTOR   - actor id (e.g. a business-directory scraper you have the right to use)
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { action, internalQuery } from "./_generated/server";
+import { directorySearch } from "./marketplace";
 
 export interface Advocate {
   name: string;
@@ -16,23 +16,36 @@ export interface Advocate {
   address?: string;
   city?: string;
   url?: string;
-  source: string;
+  source: "directory" | "apify";
+  verified: boolean;
+  distanceKm?: number | null;
+  practiceAreas?: string[];
+  languages?: string[];
+  feeRange?: string;
+  bciEnrolmentNo?: string;
+  servesYourCourt?: boolean;
 }
 
-export const directoryFallback = internalQuery({
-  args: { practiceArea: v.optional(v.string()), city: v.optional(v.string()) },
+export const directoryNear = internalQuery({
+  args: {
+    practiceArea: v.optional(v.string()),
+    city: v.optional(v.string()),
+    lat: v.optional(v.number()),
+    lng: v.optional(v.number()),
+  },
   handler: async (ctx, args): Promise<Advocate[]> => {
-    let profiles = await ctx.db
-      .query("lawyerProfiles")
-      .withIndex("by_listed_verified", (q) => q.eq("listed", true).eq("verified", true))
-      .collect();
-    if (args.practiceArea) profiles = profiles.filter((p) => p.practiceAreas.includes(args.practiceArea!));
-    if (args.city) profiles = profiles.filter((p) => (p.city ?? "").toLowerCase() === args.city!.toLowerCase());
-    return profiles.map((p) => ({
+    const rows = await directorySearch(ctx, args);
+    return rows.map((p) => ({
       name: p.displayName,
       city: p.city,
-      source: "directory",
-      address: p.practiceAreas.join(", "),
+      source: "directory" as const,
+      verified: true,
+      distanceKm: p.distanceKm,
+      practiceAreas: p.practiceAreas,
+      languages: p.languages,
+      feeRange: p.feeRange,
+      bciEnrolmentNo: p.bciEnrolmentNo,
+      servesYourCourt: p.servesYourCourt,
     }));
   },
 });
@@ -41,57 +54,57 @@ async function runApify(query: string, city: string): Promise<Advocate[]> {
   const token = process.env.APIFY_TOKEN;
   const actor = process.env.APIFY_ACTOR;
   if (!token || !actor) return [];
-  const url = `https://api.apify.com/v2/acts/${encodeURIComponent(
-    actor,
-  )}/run-sync-get-dataset-items?token=${token}`;
-  const input = {
-    searchStringsArray: [query],
-    locationQuery: city || "India",
-    maxCrawledPlacesPerSearch: 12,
-    language: "en",
-  };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!res.ok) throw new Error(`apify ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const items = (await res.json()) as any[];
-  return (Array.isArray(items) ? items : []).map((it) => ({
-    name: it.title || it.name || "Advocate",
-    phone: it.phone || it.phoneUnformatted || undefined,
-    address: it.address || it.street || undefined,
-    city: it.city || city || undefined,
-    url: it.url || it.website || it.googleMapsUrl || undefined,
-    source: "apify",
-  }));
+  const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actor)}/run-sync-get-dataset-items`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 45_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        searchStringsArray: [query],
+        locationQuery: city || "India",
+        maxCrawledPlacesPerSearch: 12,
+        language: "en",
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`apify ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const items = (await res.json()) as any[];
+    return (Array.isArray(items) ? items : []).map((it) => ({
+      name: String(it.title || it.name || "Advocate"),
+      phone: it.phone || it.phoneUnformatted || undefined,
+      address: it.address || it.street || undefined,
+      city: it.city || city || undefined,
+      url: it.url || it.website || it.googleMapsUrl || undefined,
+      source: "apify" as const,
+      verified: false,
+    }));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const findAdvocates = action({
   args: {
     practiceArea: v.optional(v.string()),
     city: v.optional(v.string()),
+    lat: v.optional(v.number()),
+    lng: v.optional(v.number()),
   },
-  handler: async (
-    ctx,
-    args,
-  ): Promise<{ source: string; advocates: Advocate[] }> => {
-    const area = args.practiceArea || "advocates";
-    const city = args.city || "";
-    // Try Apify first (real, live results with click-through) when configured.
-    if (process.env.APIFY_TOKEN && process.env.APIFY_ACTOR) {
+  handler: async (ctx, args): Promise<{ source: string; advocates: Advocate[] }> => {
+    const verified: Advocate[] = await ctx.runQuery(internal.advocates.directoryNear, args);
+    let live: Advocate[] = [];
+    if (process.env.APIFY_TOKEN && process.env.APIFY_ACTOR && (args.city || verified.length < 3)) {
       try {
-        const query = `${area} lawyer advocate ${city}`.trim();
-        const advocates = await runApify(query, city);
-        if (advocates.length > 0) return { source: "apify", advocates };
-      } catch {
-        // fall through to directory
+        live = await runApify(`${args.practiceArea ?? ""} lawyer advocate ${args.city ?? ""}`.trim(), args.city ?? "");
+      } catch (e) {
+        console.warn(`[advocates] apify failed: ${String(e).slice(0, 200)}`);
       }
     }
-    const advocates: Advocate[] = await ctx.runQuery(internal.advocates.directoryFallback, {
-      practiceArea: args.practiceArea,
-      city: args.city,
-    });
-    return { source: "directory", advocates };
+    return {
+      source: live.length ? (verified.length ? "directory+apify" : "apify") : "directory",
+      advocates: [...verified, ...live],
+    };
   },
 });

@@ -40,12 +40,12 @@ async function setup(t: ReturnType<typeof convexTest>) {
 describe("RAG pipeline (Convex, in-process)", () => {
   test("ingest is idempotent and denoises", async () => {
     const t = convexTest(schema, modules);
-    const s1 = await t.action(api.ingest.ingestRecords, { records: DEMO_CORPUS });
-    expect(s1.ingested).toBe(3);
-    expect(s1.chunks).toBeGreaterThanOrEqual(3);
-    const s2 = await t.action(api.ingest.ingestRecords, { records: DEMO_CORPUS });
+    const s1 = await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
+    expect(s1.ingested).toBe(DEMO_CORPUS.length);
+    expect(s1.chunks).toBeGreaterThanOrEqual(DEMO_CORPUS.length);
+    const s2 = await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
     expect(s2.ingested).toBe(0);
-    expect(s2.skippedDuplicate).toBe(3);
+    expect(s2.skippedDuplicate).toBe(DEMO_CORPUS.length);
 
     // noise removed from stored corpus text
     const doc = await t.run(async (ctx) =>
@@ -61,7 +61,7 @@ describe("RAG pipeline (Convex, in-process)", () => {
   test("research produces a grounded, verified brief with zero fabrication", async () => {
     const t = convexTest(schema, modules);
     const { matterId, asUser } = await setup(t);
-    await t.action(api.ingest.ingestRecords, { records: DEMO_CORPUS });
+    await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
 
     const res = await asUser.action(api.research.runResearch, {
       matterId,
@@ -71,18 +71,43 @@ describe("RAG pipeline (Convex, in-process)", () => {
     expect(res.fabricationRate).toBe(0);
     const real = new Set(DEMO_CORPUS.map((d) => d.caseName));
     for (const a of res.authorities) expect(real.has(a.caseName)).toBe(true);
+    // precision: an off-topic tenancy/medical case must not pad a motor-insurance brief
+    expect(res.authorities.some((a: any) => /Swaran Singh|Nanjappan/.test(a.caseName))).toBe(true);
+    expect(res.authorities.some((a: any) => /Shiv Sarup|Medical Association/.test(a.caseName))).toBe(false);
+    // offline: extractive summaries, never the raw echo marker
+    for (const a of res.authorities) expect(a.summary).not.toContain("offline-grounded");
+  });
+
+  test("offline drafting produces a structured, grounded first draft", async () => {
+    const t = convexTest(schema, modules);
+    const { matterId, asUser } = await setup(t);
+    await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
+    const res = await asUser.action(api.research.runResearch, {
+      matterId,
+      query: "truck driver without valid licence, insurer refused the accident claim",
+    });
+    const d = await asUser.action(api.drafting.generateDraft, {
+      briefId: res.briefId,
+      docType: "legal_notice",
+      facts: "Truck met with an accident on NH-48.",
+    });
+    expect(d.modelUsed).toBe("template");
+    expect(d.content).toContain("LEGAL NOTICE");
+    expect(d.content).toContain("Truck Co");
+    expect(d.content).toContain("[TO CONFIRM");
+    for (const a of res.authorities) expect(d.content).toContain(a.caseName);
   });
 
   test("fabricated citations are dropped (fabrication gate §9.3)", async () => {
     const t = convexTest(schema, modules);
     await setup(t);
-    await t.action(api.ingest.ingestRecords, { records: DEMO_CORPUS });
+    await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
     const res = await t.query(internal.verify.verifyCitations, {
       candidates: [
         {
           caseName: "National Insurance Co. Ltd. v. Swaran Singh",
           citationString: "(2004) 3 SCC 297",
-          relevancePassage: "insurer must establish a wilful breach",
+          relevancePassage: "insurer bears the burden of proving the breach of the policy condition",
         },
         { caseName: "Imaginary v. Fictional", citationString: "(2099) 1 SCC 1", relevancePassage: "" },
         {
@@ -99,7 +124,7 @@ describe("RAG pipeline (Convex, in-process)", () => {
 
   test("parallel citation (AIR form) resolves to the same document", async () => {
     const t = convexTest(schema, modules);
-    await t.action(api.ingest.ingestRecords, { records: DEMO_CORPUS });
+    await t.action(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
     const res = await t.query(internal.verify.verifyCitations, {
       candidates: [
         { caseName: "", citationString: "AIR 2004 SC 1531", relevancePassage: "" },

@@ -50,3 +50,23 @@ export function passageSupported(passage: string, docText: string, minRatio = 0.
   const hits = words.filter((w) => docLower.includes(w)).length;
   return hits / words.length >= minRatio;
 }
+
+/** First sentences of a passage, up to ~maxChars — a grounded, no-LLM summary. */
+// Disclaimers / provenance notes are not content — never let them BE the summary.
+const BOILERPLATE = /^(editorial summary|verify against|digitally signed|page \d+ of \d+|reportable|non-reportable)/i;
+
+export function extractiveSummary(passage: string, maxChars = 360): string {
+  const clean = passage.replace(/\s+/g, " ").trim();
+  // Split on sentence ends, but not after common legal abbreviations (Co. Ltd. v. Dr. No. etc.).
+  const protectedText = clean.replace(/\b(Co|Ltd|Pvt|vs?|Dr|Mr|Mrs|Ms|No|Nos|Art|Sec|Ss|Hon'?ble|Corpn|Govt|St|Jr|Sr|[A-Z])\./g, "$1\u0000");
+  const sentences = (protectedText.match(/[^.!?]+[.!?]+(\s|$)/g) ?? [protectedText])
+    .map((x) => x.replace(/\u0000/g, ".").trim())
+    .filter((x) => x && !BOILERPLATE.test(x));
+  if (sentences.length === 0) return clean.slice(0, maxChars).trim();
+  let out = "";
+  for (const sentence of sentences) {
+    if (out && (out + " " + sentence).length > maxChars) break;
+    out = out ? `${out} ${sentence}` : sentence;
+  }
+  return out.length > maxChars ? `${out.slice(0, maxChars - 1).trimEnd()}…` : out;
+}

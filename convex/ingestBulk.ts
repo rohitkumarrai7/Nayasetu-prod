@@ -10,8 +10,9 @@
 // and self-schedules the next (shardIndex/offset), so it is resumable, idempotent (upsert by
 // source+sourceDocId, dedup by contentHash), and stays within Convex function limits at any scale.
 import { v } from "convex/values";
-import { api, internal } from "./_generated/api";
-import { action, internalMutation, internalQuery } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { action, internalAction, internalMutation, internalQuery } from "./_generated/server";
+import { isPlatformAdmin } from "./model/admin";
 
 const mapping = v.object({
   id: v.optional(v.string()),
@@ -78,8 +79,7 @@ export const getProgress = internalQuery({
   },
 });
 
-export const ingestBulk = action({
-  args: {
+const bulkArgs = {
     source: v.string(),
     shardUrls: v.array(v.string()),
     shardIndex: v.optional(v.number()),
@@ -88,10 +88,25 @@ export const ingestBulk = action({
     maxTotal: v.optional(v.number()),
     mapping: v.optional(mapping),
     totalIngested: v.optional(v.number()),
-  },
+};
+
+export const checkAdmin = internalQuery({ args: {}, handler: async (ctx) => isPlatformAdmin(ctx) });
+
+/** Public entry point — platform admins only (fetches arbitrary URLs and writes the shared corpus). */
+export const ingestBulk = action({
+  args: bulkArgs,
   handler: async (ctx, args): Promise<{ done: boolean; source: string; totalIngested: number }> => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error("Sign in to run bulk ingestion");
+    if (!(await ctx.runQuery(internal.ingestBulk.checkAdmin, {}))) {
+      throw new Error("Forbidden: bulk ingestion is for platform admins (ADMIN_EMAILS)");
+    }
+    return ctx.runAction(internal.ingestBulk.ingestBatch, args);
+  },
+});
+
+/** One bounded batch; self-schedules the next (resumable, idempotent). */
+export const ingestBatch = internalAction({
+  args: bulkArgs,
+  handler: async (ctx, args): Promise<{ done: boolean; source: string; totalIngested: number }> => {
 
     const shardIndex = args.shardIndex ?? 0;
     const offset = args.offset ?? 0;
@@ -150,7 +165,7 @@ export const ingestBulk = action({
     }
 
     if (records.length > 0) {
-      const stats = await ctx.runAction(api.ingest.ingestRecords, { records });
+      const stats = await ctx.runAction(internal.ingest.ingestRecords, { records });
       totalIngested += stats.ingested;
     }
 
@@ -163,7 +178,7 @@ export const ingestBulk = action({
     }
     const more = nextShard < args.shardUrls.length && totalIngested < maxTotal;
     if (more) {
-      await ctx.scheduler.runAfter(0, api.ingestBulk.ingestBulk, {
+      await ctx.scheduler.runAfter(0, internal.ingestBulk.ingestBatch, {
         ...args,
         shardIndex: nextShard,
         offset: nextOffset,

@@ -1,4 +1,4 @@
-import { api } from "./_generated/api";
+import { internal } from "./_generated/api";
 import { action } from "./_generated/server";
 import { DEMO_CORPUS } from "./lib/demoData";
 
@@ -17,6 +17,6 @@ export const loadDemoCorpus = action({
   }> => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Sign in to load the demo corpus");
-    return ctx.runAction(api.ingest.ingestRecords, { records: DEMO_CORPUS });
+    return ctx.runAction(internal.ingest.ingestRecords, { records: DEMO_CORPUS });
   },
 });

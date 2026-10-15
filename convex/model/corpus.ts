@@ -25,6 +25,7 @@ export async function storeDocument(
   ctx: MutationCtx,
   doc: Omit<Doc<"corpusDocuments">, "_id" | "_creationTime">,
   chunks: StoredChunk[],
+  embedder?: string,
 ): Promise<Id<"corpusDocuments">> {
   const existing = await ctx.db
     .query("corpusDocuments")
@@ -64,6 +65,7 @@ export async function storeDocument(
       caseName: doc.caseName,
       sourceUrl: doc.sourceUrl,
       embedding: c.embedding,
+      embedder,
     });
   }
 

@@ -104,7 +104,16 @@ export const getMatter = query({
       .withIndex("by_matter", (q) => q.eq("matterId", matterId))
       .order("desc")
       .collect();
-    return { matter, client, briefs, drafts };
+    const briefsWithCitations = await Promise.all(
+      briefs.map(async (b) => ({
+        ...b,
+        citations: await ctx.db
+          .query("citations")
+          .withIndex("by_brief", (q) => q.eq("briefId", b._id))
+          .collect(),
+      })),
+    );
+    return { matter, client, briefs: briefsWithCitations, drafts };
   },
 });
 
@@ -123,6 +132,49 @@ export const updateMatterStatus = mutation({
     const matter = await loadMatterScoped(ctx, matterId);
     await ctx.db.patch(matterId, { status });
     await audit(ctx, "matter.status", `matters/${matterId}`, matter.firmId, { status });
+  },
+});
+
+export const updateMatter = mutation({
+  args: { matterId: v.id("matters"), title: v.optional(v.string()), summaryText: v.optional(v.string()) },
+  handler: async (ctx, { matterId, title, summaryText }) => {
+    const matter = await loadMatterScoped(ctx, matterId);
+    const patch: { title?: string; summaryText?: string } = {};
+    if (title !== undefined && title.trim()) patch.title = title.trim().slice(0, 200);
+    if (summaryText !== undefined) patch.summaryText = summaryText.slice(0, 20_000);
+    await ctx.db.patch(matterId, patch);
+    await audit(ctx, "matter.update", `matters/${matterId}`, matter.firmId);
+  },
+});
+
+export const toggleChecklistItem = mutation({
+  args: { matterId: v.id("matters"), item: v.string(), done: v.boolean() },
+  handler: async (ctx, { matterId, item, done }) => {
+    const matter = await loadMatterScoped(ctx, matterId);
+    const set = new Set(matter.checklistDone ?? []);
+    if (done) set.add(item);
+    else set.delete(item);
+    await ctx.db.patch(matterId, { checklistDone: [...set] });
+  },
+});
+
+export const updateClient = mutation({
+  args: {
+    clientId: v.id("clients"),
+    name: v.optional(v.string()),
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+    city: v.optional(v.string()),
+    notes: v.optional(v.string()),
+  },
+  handler: async (ctx, { clientId, ...rest }) => {
+    const client = await ctx.db.get(clientId);
+    if (!client) throw new Error("Client not found");
+    await requireFirmMember(ctx, client.firmId);
+    const patch = Object.fromEntries(Object.entries(rest).filter(([, val]) => val !== undefined));
+    if (typeof patch.name === "string" && !patch.name.trim()) throw new Error("Client name can't be empty.");
+    await ctx.db.patch(clientId, patch);
+    await audit(ctx, "client.update", `clients/${clientId}`, client.firmId);
   },
 });
 

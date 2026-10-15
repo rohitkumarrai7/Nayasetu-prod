@@ -31,3 +31,14 @@ describe("passageSupported", () => {
     );
   });
 });
+
+import { extractiveSummary } from "./text";
+describe("extractiveSummary", () => {
+  it("skips disclaimers and does not split on legal abbreviations", () => {
+    const s = extractiveSummary(
+      "Editorial summary (NyayaSetu demo corpus) — verify against the full judgment. The Court in National Insurance Co. Ltd. v. Pranay Sethi settled future prospects. It also fixed conventional heads.",
+    );
+    expect(s.startsWith("The Court in National Insurance Co. Ltd. v. Pranay Sethi settled")).toBe(true);
+    expect(s).not.toMatch(/Editorial summary/);
+  });
+});

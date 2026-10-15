@@ -1,9 +1,9 @@
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { action, internalMutation, internalQuery } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { chunkText } from "./lib/chunk";
 import { cleanJudgmentText, contentHash, isLowQuality } from "./lib/clean";
-import { embedTexts } from "./lib/embeddings";
+import { embedWithInfo } from "./lib/embeddings";
 import { contentHashExists, storeDocument, StoredChunk } from "./model/corpus";
 
 const rawJudgment = v.object({
@@ -18,6 +18,7 @@ const rawJudgment = v.object({
   decisionDate: v.optional(v.string()),
   bench: v.optional(v.string()),
   sourceUrl: v.optional(v.string()),
+  docType: v.optional(v.string()), // "judgment" (default) | "statute"
 });
 
 export const hashExists = internalQuery({
@@ -50,18 +51,22 @@ export const storeJudgment = internalMutation({
         embedding: v.array(v.float64()),
       }),
     ),
+    embedder: v.optional(v.string()),
   },
-  handler: async (ctx, { doc, chunks }) => {
-    return storeDocument(ctx, doc, chunks as StoredChunk[]);
+  handler: async (ctx, { doc, chunks, embedder }) => {
+    return storeDocument(ctx, doc, chunks as StoredChunk[], embedder);
   },
 });
 
 /**
+ * INTERNAL: corpus writes are never exposed to clients (corpus poisoning). Entry points are
+ * seed.loadDemoCorpus and ingestBulk.ingestBulk (platform admin).
+ *
  * Ingest judgments: clean(denoise) -> quality gate -> dedup -> chunk -> embed -> store.
  * Idempotent (upsert by source+sourceDocId, dedup by contentHash) and resumable (call in
  * bounded batches). Runs as an action because embedding may call an external API.
  */
-export const ingestRecords = action({
+export const ingestRecords = internalAction({
   args: { records: v.array(rawJudgment) },
   handler: async (ctx, { records }) => {
     const stats = {
@@ -92,7 +97,7 @@ export const ingestRecords = action({
         stats.skippedLowQuality++;
         continue;
       }
-      const vectors = await embedTexts(rawChunks.map((c) => c.text));
+      const { vectors, embedder } = await embedWithInfo(rawChunks.map((c) => c.text));
       const chunks = rawChunks.map((c, i) => ({
         ordinal: c.ordinal,
         paraLabel: c.paraLabel,
@@ -114,12 +119,13 @@ export const ingestRecords = action({
           citations: rawCites,
           decisionDate: rec.decisionDate,
           bench: rec.bench,
-          docType: "judgment",
+          docType: rec.docType ?? "judgment",
           sourceUrl: rec.sourceUrl,
           contentHash: chash,
           cleanText: cleaned,
         },
         chunks,
+        embedder,
       });
       stats.ingested++;
       stats.chunks += chunks.length;

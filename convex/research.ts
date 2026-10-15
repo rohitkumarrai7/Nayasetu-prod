@@ -2,16 +2,30 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 import { action, internalMutation, internalQuery } from "./_generated/server";
-import { extractAllCitations } from "./lib/citation";
-import { embedOne } from "./lib/embeddings";
+import { extractiveSummary } from "./lib/text";
 import { complete } from "./lib/llm";
 import { requireFirmMember } from "./model/access";
+import { hybridRetrieve, mapLimit } from "./model/retrieval";
 
 const SUMMARY_SYS =
   "You are a legal research assistant. Summarize ONLY the provided source passage. Do not add " +
   "facts, holdings, or citations not present in it. If the passage does not support a point, omit it.";
 
 // ── internal helpers ─────────────────────────────────────────────────────────
+/** Lexical leg of hybrid retrieval: full-text (BM25-style) over chunk text. */
+export const lexicalChunks = internalQuery({
+  args: { query: v.string(), limit: v.number() },
+  handler: async (ctx, { query, limit }) => {
+    const q = query.slice(0, 500).trim();
+    if (!q) return [];
+    const rows = await ctx.db
+      .query("corpusChunks")
+      .withSearchIndex("search_text", (s) => s.search("text", q))
+      .take(limit);
+    return rows.map((r) => r._id);
+  },
+});
+
 export const matterAccess = internalQuery({
   args: { matterId: v.id("matters") },
   handler: async (ctx, { matterId }) => {
@@ -129,75 +143,38 @@ export const runResearch = action({
     body: string;
   }> => {
     const sensitivity = args.sensitivity ?? "privileged";
-    const topK = args.topK ?? 8;
+    const topK = Math.min(12, Math.max(1, args.topK ?? 6));
     const { firmId } = await ctx.runQuery(internal.research.matterAccess, {
       matterId: args.matterId,
     });
 
-    // 1) retrieve from the grounded corpus (vector search — actions only)
-    const qvec = await embedOne(args.query);
-    const hits = await ctx.vectorSearch("corpusChunks", "by_embedding", {
-      vector: qvec,
-      limit: topK,
-    });
-    const { authorities: retrieved, passages } = await ctx.runQuery(
-      internal.research.retrievedAuthorities,
-      { ids: hits.map((h) => h._id as Id<"corpusChunks">) },
-    );
+    if (!args.query.trim()) throw new Error("Enter a research question.");
 
-    // 2) INLINE cross-citations found in retrieved text are candidates for additional authorities;
-    //    verify them against the corpus (unresolved are dropped -> fabricationRate).
-    const inlineCandidates: { caseName: string; citationString: string; relevancePassage: string }[] = [];
-    for (const p of passages) {
-      for (const pc of extractAllCitations(p)) {
-        inlineCandidates.push({ caseName: "", citationString: pc.raw, relevancePassage: p.slice(0, 400) });
+    // Hybrid retrieval → inline cross-citation verification → IDF re-rank (model/retrieval.ts).
+    const ret = await hybridRetrieve(ctx, args.query, topK);
+    const vres = { fabricationRate: ret.fabricationRate, droppedCount: ret.droppedCount };
+    const kept = ret.authorities;
+    // Summaries in parallel (bounded). Without an LLM, an extractive summary of the passage itself
+    // — still grounded by construction, never invented.
+    let modelUsed = `extractive (${ret.embedder} retrieval)`;
+    const authorities = await mapLimit(kept, 4, async (a) => {
+      try {
+        const res = await complete(
+          sensitivity,
+          SUMMARY_SYS,
+          `Summarize this passage from ${a.caseName} in 2-3 sentences, grounded strictly in the ` +
+            `text.\n\nCONTEXT:\n${a.relevancePassage}`,
+          { timeoutMs: 20_000, maxTokens: 300 },
+        );
+        if (res.provider !== "echo" && res.text.trim()) {
+          modelUsed = `${res.provider}:${res.model}`;
+          return { ...a, summary: res.text.trim() };
+        }
+      } catch {
+        /* fall through to extractive */
       }
-    }
-    const vres = await ctx.runQuery(internal.verify.verifyCitations, {
-      candidates: inlineCandidates,
+      return { ...a, summary: extractiveSummary(a.relevancePassage) };
     });
-
-    // 3) authorities = retrieved docs (grounded by construction) + verified inline cross-cites,
-    //    deduped by document. Summarize each over its own passage only.
-    const merged = new Map<
-      string,
-      { caseName: string; citationString: string; sourceUrl?: string; corpusDocumentId?: string; relevancePassage: string; matchMethod: string }
-    >();
-    for (const a of retrieved) {
-      merged.set(a.documentId, {
-        caseName: a.caseName,
-        citationString: a.citation,
-        sourceUrl: a.sourceUrl ?? undefined,
-        corpusDocumentId: a.documentId,
-        relevancePassage: a.passage,
-        matchMethod: "retrieval",
-      });
-    }
-    for (const v of vres.verified) {
-      if (!merged.has(v.corpusDocumentId)) {
-        merged.set(v.corpusDocumentId, {
-          caseName: v.caseName,
-          citationString: v.citationString,
-          sourceUrl: v.sourceUrl ?? undefined,
-          corpusDocumentId: v.corpusDocumentId,
-          relevancePassage: v.relevancePassage,
-          matchMethod: v.matchMethod,
-        });
-      }
-    }
-
-    const authorities = [];
-    let modelUsed = "echo";
-    for (const a of merged.values()) {
-      const res = await complete(
-        sensitivity,
-        SUMMARY_SYS,
-        `Summarize this passage from ${a.caseName} in 2-3 sentences, grounded strictly in the ` +
-          `text.\n\nCONTEXT:\n${a.relevancePassage}`,
-      );
-      modelUsed = `${res.provider}:${res.model}`;
-      authorities.push({ ...a, summary: res.text.trim() });
-    }
 
     const body = renderBody(args.query, authorities);
     const briefId = await ctx.runMutation(internal.research.saveBrief, {

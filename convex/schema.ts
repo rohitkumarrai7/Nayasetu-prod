@@ -51,6 +51,10 @@ export default defineSchema({
       v.literal("closed"),
     ),
     createdBy: v.id("users"),
+    // Set when the matter was created by accepting a citizen lead (L7 → CRM).
+    sourceLeadId: v.optional(v.id("chatSessions")),
+    // Intake checklist items the advocate has marked as collected (L1).
+    checklistDone: v.optional(v.array(v.string())),
   })
     .index("by_firm", ["firmId"])
     .index("by_firm_status", ["firmId", "status"])
@@ -103,13 +107,19 @@ export default defineSchema({
     caseName: v.string(),
     sourceUrl: v.optional(v.string()),
     embedding: v.array(v.float64()),
+    // Which embedder produced `embedding` ("gemini" | "hash"). Vectors from different embedders
+    // are not comparable, so retrieval filters on this. Optional only for legacy rows.
+    embedder: v.optional(v.string()),
   })
     .index("by_document", ["documentId"])
+    .index("by_embedder", ["embedder"])
     .vectorIndex("by_embedding", {
       vectorField: "embedding",
       dimensions: EMBEDDING_DIM,
-      filterFields: ["caseName"],
-    }),
+      filterFields: ["caseName", "embedder"],
+    })
+    // Lexical signal for hybrid retrieval (PRD §9): BM25-style full-text over chunk text.
+    .searchIndex("search_text", { searchField: "text" }),
 
   ingestRuns: defineTable({
     source: v.string(),
@@ -151,6 +161,47 @@ export default defineSchema({
     .index("by_firm", ["firmId"])
     .index("by_brief", ["briefId"]),
 
+  // Advocate research copilot (Side A chatbot, PRD §3 Perplexity-style): grounded,
+  // multi-turn, privileged. Separate from the citizen assistant (chatSessions): different users,
+  // different data sensitivity, different LLM routing.
+  copilotThreads: defineTable({
+    firmId: v.id("firms"),
+    userId: v.id("users"),
+    matterId: v.optional(v.id("matters")),
+    title: v.string(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId", "updatedAt"])
+    .index("by_matter", ["matterId", "updatedAt"]),
+
+  copilotMessages: defineTable({
+    threadId: v.id("copilotThreads"),
+    firmId: v.id("firms"),
+    role: v.union(v.literal("user"), v.literal("assistant")),
+    content: v.string(),
+    status: v.union(v.literal("pending"), v.literal("done"), v.literal("error")),
+    // Live "thinking" states, appended by the generator as each stage completes.
+    steps: v.array(v.string()),
+    sources: v.optional(
+      v.array(
+        v.object({
+          n: v.number(),
+          caseName: v.string(),
+          citationString: v.string(),
+          sourceUrl: v.optional(v.string()),
+          corpusDocumentId: v.optional(v.id("corpusDocuments")),
+          passage: v.string(),
+          matchMethod: v.string(),
+        }),
+      ),
+    ),
+    fabricationRate: v.optional(v.number()),
+    droppedCount: v.optional(v.number()),
+    removed: v.optional(v.array(v.string())),
+    modelUsed: v.optional(v.string()),
+    briefId: v.optional(v.id("researchBriefs")),
+  }).index("by_thread", ["threadId"]),
+
   drafts: defineTable({
     firmId: v.id("firms"),
     matterId: v.id("matters"),
@@ -167,16 +218,59 @@ export default defineSchema({
     userId: v.id("users"),
     displayName: v.string(),
     bciEnrolmentNo: v.optional(v.string()),
+    enrolmentState: v.optional(v.string()), // State Bar Council of enrolment
+    enrolmentYear: v.optional(v.number()),
     practiceAreas: v.array(v.string()),
     languages: v.array(v.string()),
     city: v.optional(v.string()),
     feeRange: v.optional(v.string()),
     listed: v.boolean(),
     verified: v.boolean(),
+    // BCI verification workflow (L8): never self-serve; set by a platform admin.
+    verificationStatus: v.optional(
+      v.union(v.literal("unsubmitted"), v.literal("pending"), v.literal("verified"), v.literal("rejected")),
+    ),
+    verificationNote: v.optional(v.string()),
+    submittedAt: v.optional(v.number()),
+    verifiedAt: v.optional(v.number()),
+    // M2 geo: office location → nearest-N district courts ("home courts") + radius.
+    officeLat: v.optional(v.number()),
+    officeLng: v.optional(v.number()),
+    geoBucket: v.optional(v.string()), // geohash prefix for candidate pre-filtering
+    homeCourts: v.optional(v.array(v.string())), // districtCourts.code, nearest first
+    radiusKm: v.optional(v.number()),
   })
     .index("by_user", ["userId"])
     .index("by_city", ["city"])
-    .index("by_listed_verified", ["listed", "verified"]),
+    .index("by_listed_verified", ["listed", "verified"])
+    .index("by_listed_verified_bucket", ["listed", "verified", "geoBucket"])
+    .index("by_verification", ["verificationStatus"]),
+
+  // District-court reference table (PRD §7). Seeded from lib/districtCourts; importable.
+  districtCourts: defineTable({
+    code: v.string(),
+    name: v.string(),
+    district: v.string(),
+    state: v.string(),
+    lat: v.number(),
+    lng: v.number(),
+    geoBucket: v.string(),
+  })
+    .index("by_code", ["code"])
+    .index("by_state", ["state"]),
+
+  // An advocate's action on a consented lead. Accepting converts the lead into a client + matter.
+  leadActions: defineTable({
+    sessionId: v.id("chatSessions"),
+    lawyerUserId: v.id("users"),
+    firmId: v.optional(v.id("firms")),
+    action: v.union(v.literal("accepted"), v.literal("dismissed")),
+    matterId: v.optional(v.id("matters")),
+    createdAt: v.number(),
+  })
+    .index("by_lawyer", ["lawyerUserId"])
+    .index("by_session", ["sessionId"])
+    .index("by_lawyer_session", ["lawyerUserId", "sessionId"]),
 
   bookings: defineTable({
     citizenUserId: v.id("users"),
@@ -243,13 +337,26 @@ export default defineSchema({
     subcategory: v.optional(v.string()),
     location: v.optional(v.string()),
     summary: v.optional(v.string()),
+    act: v.optional(v.string()),
     consentToShare: v.boolean(),
+    consentedAt: v.optional(v.number()),
     contactName: v.optional(v.string()),
     contactPhone: v.optional(v.string()),
     createdAt: v.number(),
+    // M2 geo (lead side): client point → nearest district court.
+    clientLat: v.optional(v.number()),
+    clientLng: v.optional(v.number()),
+    geoBucket: v.optional(v.string()),
+    nearestCourt: v.optional(v.string()), // districtCourts.code
+    nearestCourtName: v.optional(v.string()),
+    // Citizen can withdraw consent (DPDP): lead disappears from every advocate feed.
+    withdrawnAt: v.optional(v.number()),
   })
     .index("by_user", ["userId"])
-    .index("by_category", ["category"]),
+    .index("by_category", ["category"])
+    .index("by_consent", ["consentToShare", "consentedAt"])
+    .index("by_consent_bucket", ["consentToShare", "geoBucket"])
+    .index("by_consent_court", ["consentToShare", "nearestCourt"]),
 
   // Per-source sync cursor for the scheduled real-time pull (resumable, dedup-aware).
   syncState: defineTable({
